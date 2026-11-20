@@ -1,6 +1,8 @@
+
 const WithdrawRequest = require("../models/WithdrawRequest");
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
+const Order = require("../models/Order");
 
 /**
  * USER → Create withdraw request
@@ -44,6 +46,7 @@ exports.requestWithdraw = async (req, res) => {
 
     // ✅ Get user
     const user = await User.findById(userId);
+
     if (!user) {
       return res
         .status(404)
@@ -51,11 +54,40 @@ exports.requestWithdraw = async (req, res) => {
     }
 
     // 🔐 Verify LOGIN password
-    const isMatch = await bcrypt.compare(withdrawPassword, user.loginPassword);
+    const isMatch = await bcrypt.compare(
+      withdrawPassword,
+      user.loginPassword
+    );
+
     if (!isMatch) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid password" });
+    }
+
+    // 📦 Check if user has any orders
+
+    // ❌ Agar current active order hai
+    // Active order grabbed but not submitted
+    if ((user.currentOrders || 0) > 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Complete your current order first"
+      });
+    }
+
+    // Once user submits even 1 order,
+    // then 25 order withdrawal rule starts
+    if (
+      (user.totalOrders || 0) > 0 &&
+      (user.totalOrders || 0) < 25
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: `Complete ${
+          25 - (user.totalOrders || 0)
+        } more orders to unlock withdrawals`
+      });
     }
 
     // 💰 Balance check
@@ -83,6 +115,7 @@ exports.requestWithdraw = async (req, res) => {
 
   } catch (error) {
     console.error("requestWithdraw error:", error);
+
     return res
       .status(500)
       .json({ success: false, message: "Server error" });
@@ -92,7 +125,8 @@ exports.requestWithdraw = async (req, res) => {
 /**
  * ADMIN → Approve withdraw
  * - Deduct balance
- * - Delete request after approval
+ * - Keep approved request in database
+ * - Save status as approved
  */
 exports.approveWithdraw = async (req, res) => {
   try {
@@ -101,33 +135,56 @@ exports.approveWithdraw = async (req, res) => {
       .populate("user");
 
     if (!withdrawRequest) {
-      return res.status(404).json({ message: "Withdraw request not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Withdraw request not found"
+      });
+    }
+
+    // 🛡️ Prevent duplicate approval
+    if (withdrawRequest.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "This withdrawal request has already been processed"
+      });
     }
 
     const user = withdrawRequest.user;
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found"
+      });
+    }
 
     // Safety check
     if (user.totalBalance < withdrawRequest.amount) {
       return res
         .status(400)
-        .json({ message: "Insufficient balance at approval time" });
+        .json({
+          success: false,
+          message: "Insufficient balance at approval time"
+        });
     }
 
-    // 💸 Deduct balances
-    
+    // 💸 Deduct balance
     user.totalBalance -= withdrawRequest.amount;
     await user.save();
 
-    // 🗑 Remove request after approval
-    await WithdrawRequest.findByIdAndDelete(req.params.id);
+    // ✅ Keep approved withdrawal record
+    withdrawRequest.status = "approved";
+    await withdrawRequest.save();
 
     return res.json({
       success: true,
       message: "Withdraw approved and balance updated",
+      withdraw: withdrawRequest
     });
 
   } catch (error) {
     console.error("approveWithdraw error:", error);
+
     return res
       .status(500)
       .json({ message: "Server error" });
@@ -143,7 +200,9 @@ exports.rejectWithdraw = async (req, res) => {
     const withdrawRequest = await WithdrawRequest.findById(req.params.id);
 
     if (!withdrawRequest) {
-      return res.status(404).json({ message: "Withdraw request not found" });
+      return res.status(404).json({
+        message: "Withdraw request not found"
+      });
     }
 
     await WithdrawRequest.findByIdAndDelete(req.params.id);
@@ -155,6 +214,7 @@ exports.rejectWithdraw = async (req, res) => {
 
   } catch (error) {
     console.error("rejectWithdraw error:", error);
+
     return res
       .status(500)
       .json({ message: "Server error" });

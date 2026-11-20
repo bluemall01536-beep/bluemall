@@ -40,14 +40,14 @@ router.post("/approve/:id", auth, admin, approveDeposit);
 router.post("/reject/:id", auth, admin, rejectDeposit);
 
 // =====================================================
-// USER → GET DEPOSIT RECORDS (🆕 ADDED, SAFE)
+// USER → GET OWN DEPOSIT RECORDS (username se)
+// GET /api/deposit/deposit-records/:username
+// Records token wale user (req.user.id) se aate hain; URL ka username sirf route match ke liye hai.
 // =====================================================
-router.get("/deposit-records/:invitationCode", auth, async (req, res) => {
+router.get("/deposit-records/:username", auth, async (req, res) => {
   try {
-    const { invitationCode } = req.params;
-
-    // 🔍 Find user by invitation code
-    const user = await User.findOne({ invitationCode });
+    // 🔍 Token wala user
+    const user = await User.findById(req.user.id);
     if (!user) {
       return res.status(404).json({
         success: false,
