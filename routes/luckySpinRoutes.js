@@ -256,6 +256,20 @@ const calcVipLevel = (baseVip, totalValue) => {
 };
 
 const getVipInfo = async (userDoc, opts) => {
+  // ✅ DEMO ACCOUNT: direct VIP 3 (KYC / deposit / balance check skip)
+  if (String(userDoc.role || "").toLowerCase() === "demo") {
+    return {
+      vipLevel: 3,
+      totalDeposits: Number(userDoc.totalDeposits) || 0,
+      totalValue: round2(
+        (Number(userDoc.totalBalance) || 0) +
+          (Number(userDoc.rewardBalance) || 0)
+      ),
+      kycApproved: true,
+      kycStatus: "approved",
+    };
+  }
+
   const totalDeposits = await getTotalDeposits(
     userDoc,
     opts
