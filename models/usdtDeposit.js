@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
 | USDT DEPOSIT MODEL
 |--------------------------------------------------------------------------
 | Networks: TRC20, BEP20, ERC20
-| Minimum deposit: 10 USDT
+| Minimum deposit: 5 USDT
 | User enters amount; backend assigns a unique matching amount.
 | Blockchain transaction identity is stored internally for deduplication.
 |--------------------------------------------------------------------------
@@ -226,5 +226,5 @@ module.exports = {
   USDTDeposit,
   USDTWalletSettings,
   NETWORKS,
-  MIN_DEPOSIT: 10,
+  MIN_DEPOSIT: 5,
 };
