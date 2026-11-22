@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 /*
@@ -60,9 +59,43 @@ const depositSchema = new mongoose.Schema(
         "completed",
         "expired",
         "review",
+        "rejected",
       ],
       default: "pending",
       index: true,
+    },
+
+    // auto   = Customer / Agent: balance is credited by the blockchain scanner
+    //          (admin can still approve / reject / edit). Expires after 1 hour.
+    // manual = Demo account: only admin credits the balance. Never expires.
+    mode: {
+      type: String,
+      enum: ["auto", "manual"],
+      default: "auto",
+      index: true,
+    },
+
+    // Amount edited by admin. When set, this is what gets credited on approve.
+    adminAmount: {
+      type: String,
+      default: null,
+    },
+
+    adminNote: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    reviewedAt: {
+      type: Date,
+      default: null,
     },
 
     // Internal blockchain event identity.
@@ -87,9 +120,13 @@ const depositSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Manual (Demo) deposits never expire, so expiresAt is null for them.
     expiresAt: {
       type: Date,
-      required: true,
+      required: function () {
+        return this.mode !== "manual";
+      },
+      default: null,
       index: true,
     },
 

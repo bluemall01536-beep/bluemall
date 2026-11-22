@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const authMiddleware = require('../middleware/authMiddleware');
+const User = require('../models/User');
 
 const {
     USDTDeposit,
@@ -14,6 +15,30 @@ const {
 const router = express.Router();
 
 const ACTIVE_STATUSES = ['pending', 'confirming'];
+
+// Statuses an admin may still approve / reject / edit.
+// 'expired' is included so an Auto deposit that was paid after the
+// 1-hour window can still be credited manually.
+const REVIEWABLE_STATUSES = ['pending', 'confirming', 'review', 'expired'];
+
+const isDemoUser = (req) => String(req.user?.role || '').toLowerCase() === 'demo';
+
+// Auto (Customer / Agent) deposits expire after their window.
+// Manual (Demo) deposits never expire.
+async function expireStaleDeposits() {
+    try {
+        await USDTDeposit.updateMany(
+            {
+                mode: { $ne: 'manual' },
+                status: 'pending',
+                expiresAt: { $lte: new Date() },
+            },
+            { $set: { status: 'expired' } }
+        );
+    } catch (error) {
+        console.error('USDT expire stale deposits error:', error);
+    }
+}
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -70,8 +95,13 @@ function sanitizeDeposit(deposit) {
     return {
         id: deposit._id,
         network: deposit.network,
+        username: deposit.username,
+        mode: deposit.mode || 'auto',
         requestedAmount: deposit.requestedAmount,
         assignedAmount: deposit.assignedAmount,
+        adminAmount: deposit.adminAmount || null,
+        adminNote: deposit.adminNote || '',
+        reviewedAt: deposit.reviewedAt || null,
         walletAddress: deposit.walletAddress,
         status: deposit.status,
         confirmations: deposit.confirmations || 0,
@@ -128,6 +158,10 @@ router.post('/create', authMiddleware, async (req, res) => {
             });
         }
 
+        await expireStaleDeposits();
+
+        const mode = isDemoUser(req) ? 'manual' : 'auto';
+
         const wallet = await USDTWalletSettings.findOne({
             network,
             isActive: true,
@@ -170,7 +204,9 @@ router.post('/create', authMiddleware, async (req, res) => {
                     assignedAmount,
                     walletAddress: wallet.walletAddress,
                     status: 'pending',
-                    expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+                    mode,
+                    // Demo (manual) deposits never expire.
+                    expiresAt: mode === 'manual' ? null : new Date(Date.now() + 60 * 60 * 1000),
                 });
 
                 break;
@@ -189,7 +225,9 @@ router.post('/create', authMiddleware, async (req, res) => {
 
         return res.status(201).json({
             success: true,
-            message: 'Deposit request created. Send the exact amount shown below.',
+            message: mode === 'manual'
+                ? 'Deposit request created. Send the exact amount shown below.'
+                : 'Deposit request created. Send the exact amount shown below. Balance is added automatically after payment.',
             deposit: sanitizeDeposit(deposit),
             instructions: {
                 currency: 'USDT',
@@ -219,6 +257,8 @@ router.post('/create', authMiddleware, async (req, res) => {
 router.get('/my', authMiddleware, async (req, res) => {
     try {
         const userId = getUserId(req);
+
+        await expireStaleDeposits();
 
         const deposits = await USDTDeposit.find({ userId })
             .sort({ createdAt: -1 })
@@ -378,21 +418,30 @@ router.put(
 
 router.get('/admin/all', authMiddleware, async (req, res) => {
     try {
-        const isAdmin =
-            req.user?.isAdmin === true ||
-            req.user?.role === 'admin';
+        await expireStaleDeposits();
 
-        if (!isAdmin) {
-            return res.status(403).json({
-                success: false,
-                message: 'Admin access required.',
-            });
+        const filter = {};
+
+        const status = String(req.query?.status || '').toLowerCase();
+        const mode = String(req.query?.mode || '').toLowerCase();
+
+        if (status === 'active') {
+            filter.status = { $in: ['pending', 'confirming', 'review', 'expired'] };
+        } else if (status === 'history') {
+            filter.status = { $in: ['completed', 'rejected'] };
+        } else if (status) {
+            filter.status = status;
         }
 
-        const deposits = await USDTDeposit.find({})
+        if (mode === 'auto') filter.mode = { $ne: 'manual' };
+        if (mode === 'manual') filter.mode = 'manual';
+
+        const deposits = await USDTDeposit.find(filter)
             .sort({ createdAt: -1 })
             .limit(200)
             .lean();
+
+        res.set('Cache-Control', 'no-store');
 
         return res.json({
             success: true,
@@ -406,6 +455,274 @@ router.get('/admin/all', authMiddleware, async (req, res) => {
             success: false,
             message: 'Unable to load deposits.',
         });
+    }
+});
+
+// =====================================================
+// ADMIN: DASHBOARD STATS
+// GET /api/usdt-deposit/admin/stats
+// totalDeposits   = sum of credited amounts of all completed (approved) deposits
+// pendingDeposits = deposits still waiting (pending / confirming / review)
+// =====================================================
+
+router.get('/admin/stats', authMiddleware, async (req, res) => {
+    try {
+        await expireStaleDeposits();
+
+        const [completed] = await USDTDeposit.aggregate([
+            { $match: { status: 'completed' } },
+            {
+                $group: {
+                    _id: null,
+                    total: {
+                        $sum: { $toDouble: { $ifNull: ['$creditedAmount', '0'] } },
+                    },
+                },
+            },
+        ]);
+
+        const pendingDeposits = await USDTDeposit.countDocuments({
+            status: { $in: ['pending', 'confirming', 'review'] },
+        });
+
+        res.set('Cache-Control', 'no-store');
+
+        return res.json({
+            success: true,
+            stats: {
+                totalDeposits: Math.round((completed?.total || 0) * 100) / 100,
+                pendingDeposits,
+            },
+        });
+
+    } catch (error) {
+        console.error('USDT admin stats error:', error);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to load deposit stats.',
+        });
+    }
+});
+
+// =====================================================
+// ADMIN: EDIT DEPOSIT AMOUNT
+// PATCH /api/usdt-deposit/admin/:id/amount
+// Body: { amount: "150.5", note?: "..." }
+// The edited amount is what gets credited when the deposit is approved.
+// =====================================================
+
+router.patch('/admin/:id/amount', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ success: false, message: 'Invalid deposit id.' });
+        }
+
+        let units;
+
+        try {
+            units = toMicroUnits(req.body?.amount);
+        } catch (error) {
+            return res.status(400).json({ success: false, message: error.message });
+        }
+
+        if (units <= 0n) {
+            return res.status(400).json({ success: false, message: 'Amount must be greater than 0.' });
+        }
+
+        const update = { adminAmount: fromMicroUnits(units) };
+
+        if (typeof req.body?.note === 'string') {
+            update.adminNote = req.body.note.trim().slice(0, 300);
+        }
+
+        const deposit = await USDTDeposit.findOneAndUpdate(
+            { _id: id, status: { $in: REVIEWABLE_STATUSES } },
+            { $set: update },
+            { new: true }
+        ).lean();
+
+        if (!deposit) {
+            return res.status(409).json({
+                success: false,
+                message: 'Deposit not found or already processed.',
+            });
+        }
+
+        return res.json({
+            success: true,
+            message: 'Deposit amount updated.',
+            deposit: sanitizeDeposit(deposit),
+        });
+
+    } catch (error) {
+        console.error('USDT edit amount error:', error);
+
+        return res.status(500).json({ success: false, message: 'Unable to update amount.' });
+    }
+});
+
+// =====================================================
+// ADMIN: APPROVE DEPOSIT (credits user balance)
+// POST /api/usdt-deposit/admin/:id/approve
+// Body (optional): { amount: "150.5", note?: "..." }
+// Amount credited = body.amount, else admin-edited amount, else requested amount.
+// Deposit status change and balance credit happen in one transaction, and
+// the status guard makes sure the balance is credited only once even if the
+// scanner and admin act at the same time.
+// =====================================================
+
+router.post('/admin/:id/approve', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ success: false, message: 'Invalid deposit id.' });
+    }
+
+    const session = await mongoose.startSession();
+
+    try {
+        let result = null;
+        let failure = null;
+
+        await session.withTransaction(async () => {
+            result = null;
+            failure = null;
+
+            const current = await USDTDeposit.findOne({
+                _id: id,
+                status: { $in: REVIEWABLE_STATUSES },
+            }).session(session);
+
+            if (!current) {
+                failure = { code: 409, message: 'Deposit not found or already processed.' };
+                return;
+            }
+
+            let units;
+
+            try {
+                units = toMicroUnits(
+                    req.body?.amount ?? current.adminAmount ?? current.requestedAmount
+                );
+            } catch (error) {
+                failure = { code: 400, message: error.message };
+                return;
+            }
+
+            if (units <= 0n) {
+                failure = { code: 400, message: 'Amount must be greater than 0.' };
+                return;
+            }
+
+            const creditedAmount = fromMicroUnits(units);
+            const numericAmount = Number(creditedAmount);
+
+            const set = {
+                status: 'completed',
+                creditedAmount,
+                adminAmount: creditedAmount,
+                creditedAt: new Date(),
+                reviewedBy: getUserId(req),
+                reviewedAt: new Date(),
+            };
+
+            if (typeof req.body?.note === 'string') {
+                set.adminNote = req.body.note.trim().slice(0, 300);
+            }
+
+            const claimed = await USDTDeposit.findOneAndUpdate(
+                { _id: id, status: { $in: REVIEWABLE_STATUSES } },
+                { $set: set },
+                { new: true, session }
+            );
+
+            if (!claimed) {
+                failure = { code: 409, message: 'Deposit already processed.' };
+                return;
+            }
+
+            const updatedUser = await User.updateOne(
+                { _id: claimed.userId },
+                { $inc: { balance: numericAmount, totalBalance: numericAmount } },
+                { session }
+            );
+
+            if (updatedUser.modifiedCount !== 1) {
+                throw new Error('User balance update failed');
+            }
+
+            result = claimed.toObject();
+        });
+
+        if (failure) {
+            return res.status(failure.code).json({ success: false, message: failure.message });
+        }
+
+        return res.json({
+            success: true,
+            message: 'Deposit approved and balance credited.',
+            deposit: sanitizeDeposit(result),
+        });
+
+    } catch (error) {
+        console.error('USDT approve deposit error:', error);
+
+        return res.status(500).json({ success: false, message: 'Unable to approve deposit.' });
+    } finally {
+        await session.endSession();
+    }
+});
+
+// =====================================================
+// ADMIN: REJECT DEPOSIT
+// POST /api/usdt-deposit/admin/:id/reject
+// Body (optional): { note?: "..." }
+// =====================================================
+
+router.post('/admin/:id/reject', authMiddleware, async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ success: false, message: 'Invalid deposit id.' });
+        }
+
+        const set = {
+            status: 'rejected',
+            reviewedBy: getUserId(req),
+            reviewedAt: new Date(),
+        };
+
+        if (typeof req.body?.note === 'string') {
+            set.adminNote = req.body.note.trim().slice(0, 300);
+        }
+
+        const deposit = await USDTDeposit.findOneAndUpdate(
+            { _id: id, status: { $in: REVIEWABLE_STATUSES } },
+            { $set: set },
+            { new: true }
+        ).lean();
+
+        if (!deposit) {
+            return res.status(409).json({
+                success: false,
+                message: 'Deposit not found or already processed.',
+            });
+        }
+
+        return res.json({
+            success: true,
+            message: 'Deposit rejected.',
+            deposit: sanitizeDeposit(deposit),
+        });
+
+    } catch (error) {
+        console.error('USDT reject deposit error:', error);
+
+        return res.status(500).json({ success: false, message: 'Unable to reject deposit.' });
     }
 });
 

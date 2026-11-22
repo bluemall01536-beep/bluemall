@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 const User = require("../models/User");
 
@@ -227,8 +226,10 @@ async function creditDeposit(network, event) {
 
   // A pending request must not be expired.
   // A confirming request can only be matched again to its own event.
+  // Demo (manual) deposits are never auto-credited: only admin approves them.
   const deposits = await USDTDeposit.find({
     network,
+    mode: { $ne: "manual" },
     walletAddress: wallet.walletAddress,
     $or: [
       {
@@ -349,6 +350,7 @@ async function creditDeposit(network, event) {
           status: {
             $in: ["pending", "confirming"],
           },
+          mode: { $ne: "manual" },
           network,
         },
         {
