@@ -1,4 +1,3 @@
-
 // backend/controllers/orderController.js
 
 const mongoose = require("mongoose");
@@ -445,9 +444,11 @@ exports.submitOrder = async (req, res) => {
       // Always calculate using database values.
       // Never trust amount or commission sent by frontend.
       const requiredAmount = Number(order.amount || 0);
-      const availableBalance = Number(
-        currentUser.totalBalance || 0
-      );
+      // Available balance = totalBalance + rewardBalance
+      // (frontend bhi dono jodkar dikhata hai, isliye mismatch nahi hoga)
+      const availableBalance =
+        Number(currentUser.totalBalance || 0) +
+        Number(currentUser.rewardBalance || 0);
 
       const commission = Number(
         order.commission || 0
