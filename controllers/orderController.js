@@ -18,6 +18,14 @@ const buildFileUrl = (req, filename) => {
 };
 
 // ======================================================
+// HELPER: ROUND MONEY TO 4 DECIMALS
+// Floating-point errors (418.51279999999997 vs 418.5128)
+// se galat "insufficient balance" na aaye.
+// ======================================================
+const roundMoney = (value) =>
+  Math.round((Number(value || 0) + Number.EPSILON) * 10000) / 10000;
+
+// ======================================================
 // HELPER: FORMAT ORDER IMAGES
 // ======================================================
 const formatOrderImages = (req, order) => {
@@ -443,12 +451,13 @@ exports.submitOrder = async (req, res) => {
 
       // Always calculate using database values.
       // Never trust amount or commission sent by frontend.
-      const requiredAmount = Number(order.amount || 0);
+      const requiredAmount = roundMoney(order.amount);
       // Available balance = totalBalance + rewardBalance
       // (frontend bhi dono jodkar dikhata hai, isliye mismatch nahi hoga)
-      const availableBalance =
+      const availableBalance = roundMoney(
         Number(currentUser.totalBalance || 0) +
-        Number(currentUser.rewardBalance || 0);
+        Number(currentUser.rewardBalance || 0)
+      );
 
       const commission = Number(
         order.commission || 0
@@ -458,8 +467,9 @@ exports.submitOrder = async (req, res) => {
       // INSUFFICIENT BALANCE
       // ==============================
       if (availableBalance < requiredAmount) {
-        const balanceGap =
-          requiredAmount - availableBalance;
+        const balanceGap = roundMoney(
+          requiredAmount - availableBalance
+        );
 
         order.recordStatus = "incomplete";
         order.incompleteReason = "insufficient_balance";
